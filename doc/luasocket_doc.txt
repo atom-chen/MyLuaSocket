@@ -1,0 +1,417 @@
+
+
+# socket lua封装库
+---------------------
+
+## headers.lua
+* socket.headers.canoic  
+```
+字符规范：将用于field的小写名称 转 正式用于HTTP SMTP的名称 规范大写(canonic capitalization)
+   比如["accept-charset"] = "Accept-Charset",
+   发送时会将小写的field替换为关联的规范字符
+```
+
+## socket.lua
+
+* socket.bind(host, port [, backlog])
+```
+成功：得到server对象  失败：nil, errMsg
+    1. 创建一个tcp对象 内部会根据getaddrinfo(host)判断网络类型，从而选择创建tcp4/tcp6
+    2. 得到的是一个server对象，绑定了端口，等待客户端连接
+    3. 自动设置了属性 setoption("reuseaddr", true) 猜测是缓存域名到dns的解析缓存
+    4. 可选参数backlog  实际用于listen(backlog)  后面再分析  默认32 表示可连接客户端数量
+```
+
+* socket.connect[46](address, port [, locaddr] [, locport] [, family])
+```
+成功：得到client对象  失败：nil, errMsg
+    1. 由于指定了connect4/connect6会直接创建对应的inet/inet6对象
+    2. locaddr,locport 看底层用于connect前bind本地端口 lport能理解 laddr做什么用？ 多网卡？
+    3. family只针对 socket.connnet(...) 默认取决于系统设置
+```
+
+
+
+
+# socket.core
+---------------------
+
+* socket._VERSION
+```
+LuaSocket 3.0-rc1
+```
+
+* socket._DEBUG
+```
+如果库导出时 定义了宏 LUASOCKET_DEBUG 则改值为1 否则为nil
+并且recive和send 会多一个返回值 表示本次调用花费的时间
+```
+
+* socket._DATAGRAMSIZE
+```
+udp中receive receivefrom数据的初始缓存大小 默认8192 
+    1. 只能通过编译手段修改
+    2. 超出范围也没问题 会动态创建和释放内存  默认用char buf[UDP_DATAGRAMSIZE] 有刷区别？
+```
+
+* socket._SETSIZE
+```
+select能处理的最大个数 可能1024 - 64之间 测试获得值为64
+```
+
+* socket._SOCKETINVALID
+```
+os value for invalid socket.
+```
+
+
+
+* socket.gettime()
+```
+返回系统的一个秒数，开机时间？
+    1. 仅用于计算时间差 测试发现值和os.time()一致 多了4位小数点
+    2. 进度可以到小数点后3位 即：毫秒级别
+    3. os.clock() 可以精确到后2位
+```
+
+* socket.try(ret1 [, ret2 ... retN])
+```
+抛出一个异常当ret1不稳定时，ret2作为错误消息返回
+该异常只由protect函数捕获
+
+    1. ret1,..retN可以为任意值，一般ret1是要调用函数的返回值
+    2. 若ret1不是nil或false，则表示成功返回ret1 ... retn
+    否则调用错误处理函数 并传递ret2
+    3. 该函数在protect中包装在mt中  用于区分异常和运行时错误
+
+    -- connects or throws an exception with the appropriate error message
+    c = socket.try(socket.connect("localhost", 80))
+```
+
+
+* socket.newtry(finalizer)
+```
+创建一个新的try函数，在调用过程中，若出现异常会先调用finalizer函数
+方便做必要的清理
+作者给的例子：
+    foo = socket.protect(function()
+        -- connect somewhere
+        local c = socket.try(socket.connect("somewhere", 42))
+        -- create a try function that closes 'c' on error
+        local try = socket.newtry(function() c:close() end)
+        -- do everything reassured c will be closed 
+        try(c:send("hello there?\r\n"))
+        local answer = try(c:receive())
+        ...
+        try(c:send("good bye\r\n"))
+        c:close()
+    end)
+```
+
+* socket.protect(func)
+```
+将一个会抛异常的函数，转为一个安全的函数。
+只捕获socket.try socket.newtry产生的异常，而非lua本身错误
+func内部可以用try/assert/error来抛出异常
+返回的函数是一个等效函数，在内部try调用发生异常时返回nil,err
+```
+
+* socket.select(recvt, sendt [, timeout])
+```
+等待一组sockets改变状态
+    1. recvt sendt按数组形式存放tcp对象
+    2. recvt等待socket可以读 sendt等待socket可发送
+    3. timeout若为 nil 负数 则会导致无限阻塞
+    4. recvt sendt 可以为空table或nil  一般存 要收发的tcp对象  若为空会怎样？
+    5. 返回{recv},{send},err  前两个可能为空  err可能为 "timeout" "slect failed" nil
+    6. select监控的sockets数量是有限的 socket._SETSIZE  对应FD_SETSIZE 由系统决定
+       可能1024 - 64之间， 修改可能导致select出错
+    7. note：WinSock有bug 在非阻塞socket中 select可能获得的可写socket是没准备好send的
+    8. note2: 在调用accept之前 将server套接字作为receive调用select
+              会导致accept无限卡死 除非setTimeout(0)
+    9. close的socket传入select会被忽略
+```
+
+
+* socket.sink(mode, socket)
+```
+根据流套接字对象 创建LTN12对象  怎么用？
+mode定义了新对象的行为：
+    1. "http-chunked": 应用了chunked transfer coding ?后 发送数据 并结束后关闭
+    2. "close-when-down": 发送接收到的数据，并关闭
+    3. “keep-open”: 发送接收到的数据，并保持打开
+socket用于发送数据
+```
+
+
+* socket.source(mode, socket [, length])
+```
+和sink有点像
+mode定义了新对象的行为：
+    1. "http-chunked": 接收数据 在返回数据前 删除chunked transfer coding ?分块传输编码
+    2. "by-length": 接收固定长度的字节  需要length参数
+    3. “until-closed”: 一直接收数据 直到另一端关闭
+socket用于接收数据
+```
+
+
+
+* socket.sleep(time)
+```
+冻结程序执行n秒  若为负数立刻返回
+可以作为循环处理的调节器 防止cpu过高
+```
+
+* socket.skip(d [, ret1, ret2 ... retN])
+```
+丢弃前d个参数， 返回后面的
+用于避免创建一堆无用的变量
+比如：
+    local code, sep = socket.skip(2, string.find(line, "^(%d%d%d)(.?)"))
+
+    没啥用 哑元不就是干这个事的？
+    local _, _, code, sep = xxxx
+```
+
+
+* socket.tcp()
+```
+    创建一个tcp的master对象
+    可以通过bind后调用listen转为server对象
+    或
+    通过connect转为client对象
+    除外 master对象 只有close方法
+```
+
+* socket.tcp4()
+同socket.tcp()
+
+* socket.tcp6()
+同socket.tcp() 
+额外多了 option "ipv6-v6only" set to true.
+
+
+
+# TCP
+由socket.tcp4() tcp6()创建出的对象  文档中在区分出客户端和服务器前叫master
+
+## master
+
+* master:bind(address, port)
+```
+绑定端口和地址，得到一个server对象
+    成功：返回1  失败：nil, err
+    1. address可以是域名或ip
+    2. port [0, 64K)
+    3. 若address为 "*" 将用INADDR_ANY / IN6ADDR_ANY_INIT 作为地址
+    4. 若端口为0  则系统自动选一个临时用
+    5. 之前socket.bind实际是对tcp对象和这个函数的封装 直接得到一个server对象 
+```
+
+* master:connect(address, port)
+```
+连接远程服务器，得到一个client对象，支持send reive getsockname getpeername 
+settimeout close
+    成功：返回1  失败：nil, err
+    1. address可以是域名或ip
+    2. port [0, 64K)
+    3. err可能为 "timeout"  但依然可以调用select({}, {master}, 1) 当连接生效时就可写
+    4. 若settimeout(0) 则只尝试对应的inet/inet6地址  否则两个都会尝试
+```
+
+* master:dirty()
+* server:dirty()
+* client:dirty()
+```
+检查是否有可读的数据在缓存中
+```
+
+* master:close()
+* server:close()
+* client:close()
+```
+    释放地址和端口，可用于另一个程序
+    1. close后不允许再调用其他函数
+    2. 不再使用的sokcet对象一定要close掉 因为系统一般通过文件描述符来实现套接字
+        这是有限的资源
+```
+
+* master:getfd()
+* client:getfd()
+* server:getfd()
+```
+返回句柄对象  若被close了返回-1
+```
+
+* master:getsockname()
+* client:getsockname()
+* server:getsockname()
+```
+本地相关的信息
+成功返回ip, port, family("inet" or "inet6")  失败:nil
+```
+
+
+* master:getstats()
+* client:getstats()
+* server:getstats()
+```
+返回记账信息  对限制宽带有用
+成功：bytes received, bytes sent, age of socket in seconds
+失败：没说
+```
+
+
+* master:setstats(received, sent, age)
+* client:setstats(received, sent, age)
+* server:setstats(received, sent, age)
+```
+重值记账值
+成功：1 失败：nil
+```
+
+
+
+* master:gettimeout()
+* client:gettimeout()
+* server:gettimeout()
+```
+返回：当前块超时, 总超时   ？
+```
+
+* master:settimeout(value [, mode])
+* client:settimeout(value [, mode])
+* server:settimeout(value [, mode])
+```
+默认所有i/o操作都是阻塞的 send receive accept
+这个函数可以控制阻塞时间 防止进程卡死
+    模式：
+    'b': 单个i/o操作时间
+    't': 函数调用总时间
+    
+    1. nil or 负数 无限阻塞
+    2. 毫秒级控制 但os和lua间传输数据需要时间 dnstoip类解析也会占时间 导致时间不准确
+```
+
+
+
+
+* master:listen(backlog)
+```
+指定套接字愿意接受连接，并转为服务器对象。
+支持 accept getsockname setoption setTimeout close
+    成功：1 失败：nil, err
+    1. backlog 指定能连接客户端的数量 超过后 新客户端连接将被拒绝
+```
+
+
+* master:setfd(fd)
+* client:setfd(fd)
+* server:setfd(fd)
+```
+修改句柄  没返回值
+危险函数  不建议使用
+```
+
+
+
+## server
+
+* server:accept()
+```
+等待客户端连接，并返回一个客户端对象，表示这个对应的远程连接。
+成功：返回client  失败：nil, err
+    1. err可能为 "timeout" 
+    2. Note: select({server}, {}, 1)调用后 再accept可能导致阻塞
+        可通过settimeout解决
+```
+
+* server:getoption(option)
+```
+获取变量值  失败：nil, err
+    'keepalive'
+    'linger'
+    'reuseaddr'
+    'tcp-nodelay'
+```
+
+
+* server:setoption(option [, value])
+```
+更低级别的控制 若非知道用途别轻易设置
+    成功：1  失败：nil, err
+    'keepalive':若为true 则套接字将定期传输消息 若对方未响应 则认为已断开
+                并通知套接字的进程
+    'linger': 控制关闭程序时 套接字上还有未发送数据的行为 {on=true, timeout=1}
+                若开启 阻止进程关闭 直到传输了数据或超时
+                若关闭 系统将以最快的速度处理
+                不建议设置为0以外的值
+     'reuseaddr': true  bind操作时 允许重用本地地址(dns缓存？)
+     'tcp-nodelay': true 禁用连接的nagle算法
+     'tcp-keepidle':  限制TCP_KEEPIDLE 的秒数  linux支持
+     'tcp-keepcnt':  TCP_KEEPCNT Linux only!!
+     'tcp-keepintvl':  TCP_KEEPINTVL  Linux only!!
+     'ipv6-v6only': 限制inet6 socket仅发送和接收 ipv6数据包
+```
+
+
+
+## client
+
+* client:getoption(option)
+同server:getoption
+
+* client:setoption(option [, value])
+
+
+* client:getpeername()
+```
+获取已连接的远程对象信息
+成功返回ip, port, family("inet" or "inet6")  失败:nil
+    注：只能用于客户端对象
+```
+
+* client:receive([pattern [, prefix]])
+```
+根据不同模式接收数据，遵循lua i/o格式，不同模式间性能差异不大。
+    成功：数据流 失败：nil, err
+    模式：
+    "*a" 读取所有数据 直到连接关闭  可以用settimeout来避免阻塞
+    "*l" 读取一行数据 以\n来识别 忽略\r  所以支持windows的 \r\n  默认模式
+    "number"  读取指定字节的数据
+    
+    1. prefix 可选参数 将插入数据头
+    2. err可能为 “timeout” "closed"
+    3. 旧版有第三个参数partial表示失败时 已经读取的部分  已废弃值和第一个参数相同
+```
+
+* client:send(data [, i [, j]])
+```
+发送数据  i，j类似 string.sub(data, i, j)
+成功： 发送的字节数 == data的长度
+失败： nil, err, idxSuc(已发送的索引 包含自己)
+    1. 若失败且非closed  可以继续发送idxSuc后的内容
+    2. err可能为 “timeout” "closed"
+    3. 建议多数据一次发送 而非调用多次
+```
+
+
+* client:shutdown(mode)
+```
+关闭全双工连接的一部分
+    成功：1  失败：nil,err
+    模式：
+    'both' 不再允许发送和接收  默认
+    'send' 不再允许发送
+    'receive' 不再允许接收
+    
+    除了控制部分模式：什么情况需要？  若为both和close有啥区别？
+```
+
+
+
+
+
+
+
+
