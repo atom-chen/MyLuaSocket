@@ -41,7 +41,14 @@ function removeClient(name, reason, clients)
 end
 
 function sendMsg(msg, client, name, clients)
+    -- 1 成功 idxSuc == data.length
+	-- 2 失败 idxSuc == nil; idxLastSuc最后成功的索引 剩下的部分 需要重新发送
+    --      errMsg可能返回 "closed"  "timeout"
+    -- 测试验证：一次发送最大长度为65536  当data超长时返回 nil,"timeout",65536
+    --         所以不用考虑发送截断的情况  游戏数据包没这么长的需求
+    --        这也是之前项目一直没发现问题的原因
 	local idxSuc, err, idxLastSuc = client:send(msg)
+	
 	--print("send", #msg, idxSuc, err, idxLastSuc)
 	if nil == idxSuc then
 		if err == "closed" then
