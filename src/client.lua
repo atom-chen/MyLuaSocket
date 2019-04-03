@@ -78,17 +78,35 @@ function runClient(client)
 		 
 		recvt, sendt, status = socket.select({client}, nil, 1)
 		while #recvt > 0 do
-			local response, errMsg = client:receive("*l")
-			if response then
-				print(response)
-				recvt, sendt, status = socket.select({client}, nil, 1)
-			else
-				print("receive failed", errMsg)
-				if errMsg == "closed" then
-					closed = true
-					break
-				end
+		--官方文档说明 partial原功能废弃  等价于body  实测并非如此
+		--1   
+		-- 	*l 成功 得到数据body  必须以'\n'结尾的字节流  收到时body保留了\n
+		-- 	*a 成功 body:nil errMsg:"timeout" partial:data  竟然是这种方式获取的数据
+		-- 	*n 正确获取数据的方法  根据协议定义获取消息长度
+		--2 失败 body == nil;  partial 空字符串
+		--      errMsg可能返回 "closed"  "timeout"  
+		--      "Socket is not connected" 这个情况文档没说 不确定什么情况
+		--
+		-- *a 测试数据  "body:"nil     "errMsg:""timeout"  "partial:" xxxx
+		-- 				"body:"nil     "errMsg:""closed"   "partial:" ""
+			local body, errMsg, partial = client:receive("*a")
+			if errMsg == "closed" or errMsg == "Socket is not connected" then
+				break
 			end
+
+			if (body and string.len(body) == 0) or
+			   (partial and string.len(partial) == 0) then 
+			   break
+			end
+
+			print(body, errMsg, partial)
+			if body and partial then 
+				body = body .. partial 
+			else
+				body = body or partial
+			end
+
+			recvt, sendt, status = socket.select({client}, nil, 1)
 		end
 	end
 	return false

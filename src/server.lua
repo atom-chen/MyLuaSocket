@@ -29,7 +29,7 @@ function monitorClient(server)
 		return nil
 	end
 	--注意：不能设置为0 会导致远程退出后收不到close状态
-	client:settimeout(0.1)
+	client:settimeout(0.01)
 	return client
 end
 
@@ -49,7 +49,7 @@ function sendMsg(msg, client, name, clients)
     --        这也是之前项目一直没发现问题的原因
 	local idxSuc, err, idxLastSuc = client:send(msg)
 	
-	--print("send", #msg, idxSuc, err, idxLastSuc)
+	print("send", #msg, msg, idxSuc, err, idxLastSuc)
 	if nil == idxSuc then
 		if err == "closed" then
 			removeClient(name, "send", clients)
@@ -59,19 +59,20 @@ function sendMsg(msg, client, name, clients)
 		else
 			print("send left msg")
 			sendMsg(string.sub(msg, idxLastSuc+1), client, name, clients)
-		end end
+		end 
+	end
 	return true
 end
 
 -- 不带select
-function dealMsg(clients)
+function dealMsg2(clients)
 	if table.empty(clients) then
 		print("wait client to connect")
 		socket.sleep(1)
 	end
 
 	for name, client in pairs(clients) do
-		local recv, err = client:receive("*l")
+		local recv, err = client:receive("*a")
 		--print("receive", recv, err)
 		if nil == recv then
 			if err == "closed" then
@@ -89,7 +90,7 @@ function dealMsg(clients)
 end
 
 -- 带select版本
-function dealMsg2(clients)
+function dealMsg(clients)
 	if table.empty(clients) then
 		print("wait client to connect")
 		socket.sleep(1)
@@ -100,20 +101,43 @@ function dealMsg2(clients)
 		-- 解决：通过receive 可以得到 "closed"状态 无论对方是否发送了数据
         local recvt, sendt, status = socket.select({client}, nil, 1)
 		--print("select", status, table.size(clients))
-		table.print(recvt)
-		table.print(sendt)
+		--table.print(recvt)
+		--table.print(sendt)
 
 		--status: "select failed" "timeout" nil
-		if #recvt > 0 then
-            local recv, err = client:receive("*l")
-			if nil == recv then
-				if err == "closed" then
-					removeClient(name, "receive", clients)
-				end
-			else
-				print(name .. " receive data:" .. recv)
-				sendMsg("server back " .. recv .. "\n", client, name, clients)
+
+		while #recvt > 0 do
+		--官方文档说明 partial原功能废弃  等价于body  实测并非如此
+		--1   
+		-- 	*l 成功 得到数据body 必须以'\n'结尾的字节流  收到时body保留了\n
+		-- 	*a 成功 body:nil errMsg:"timeout" partial:data  竟然是这种方式获取的数据
+		-- 	*n 正确获取数据的方法  根据协议定义获取消息长度
+		--2 失败 body == nil;  partial 空字符串
+		--      errMsg可能返回 "closed"  "timeout"  
+		--      "Socket is not connected" 这个情况文档没说 不确定什么情况
+		--
+		-- *a 测试数据  "body:"nil     "errMsg:""timeout"  "partial:" xxxx
+		-- 				"body:"nil     "errMsg:""closed"   "partial:" ""
+			local body, errMsg, partial = client:receive("*a")
+			if errMsg == "closed" or errMsg == "Socket is not connected" then
+				removeClient(name, "receive", clients)
+				break
 			end
+
+			if (body and string.len(body) == 0) or
+			   (partial and string.len(partial) == 0) then 
+			   break
+			end
+
+			print(name, body, errMsg, partial)
+			if body and partial then 
+				body = body .. partial 
+			else
+				body = body or partial
+			end
+
+			sendMsg("server back " .. body .. "\n", client, name, clients)
+			recvt, sendt, status = socket.select({client}, nil, 1)
 		end
 	end
 end

@@ -373,7 +373,7 @@ settimeout close
 
 * client:receive([pattern [, prefix]])
 ```
-根据不同模式接收数据，遵循lua i/o格式，不同模式间性能差异不大。
+  根据不同模式接收数据，遵循lua i/o格式，不同模式间性能差异不大。
     成功：数据流 失败：nil, err
     模式：
     "*a" 读取所有数据 直到连接关闭  可以用settimeout来避免阻塞
@@ -383,6 +383,34 @@ settimeout close
     1. prefix 可选参数 将插入数据头
     2. err可能为 “timeout” "closed"
     3. 旧版有第三个参数partial表示失败时 已经读取的部分  已废弃值和第一个参数相同
+    
+  官方文档说明 partial原功能废弃  等价于body  实测并非如此
+    local body, errMsg, partial = client:receive(mode)
+    1. 模式不同用法
+     	*l 成功 得到数据body 必须以'\n'结尾的字节流  收到时body保留了\n
+     	*a 成功 body:nil errMsg:"timeout" partial:data  竟然是这种方式获取的数据
+     	*n 正确获取数据的方法  根据协议定义获取消息长度
+    2. 失败 body == nil;  partial 空字符串
+          errMsg可能返回 "closed"  "timeout"  
+          "Socket is not connected" 这个情况文档没说 不确定什么情况
+    
+     *a 测试数据  "body:"nil     "errMsg:""timeout"  "partial:" xxxx
+    			"body:"nil     "errMsg:""closed"   "partial:" ""
+
+  正确的处理:
+    不再以body是否为nil or errMsg为"timeout" 来判断成功/失败
+    a  errMsg == "closed" or errMsg == "Socket is not connected" 属于断开
+    b  根据数据情况 判断是否成功
+    	if (body and string.len(body) == 0) or
+           (partial and string.len(partial) == 0) then 
+           break
+        end
+    c 获取正确数据
+        if body and partial then   不确定是否有这种情况
+            body = body .. partial 
+        else
+            body = body or partial
+        end
 ```
 
 * client:send(data [, i [, j]])
